@@ -3,6 +3,16 @@
 Implements the subset agents actually use: initialize, ping,
 tools/list and tools/call, with auth and rate-limit gates applied
 uniformly before dispatch.
+
+Protocol rules honoured (0.1.1):
+- Notifications (requests without an ``id``, e.g.
+  ``notifications/initialized``) NEVER receive a response —
+  ``handle()`` returns None for them.
+- A malformed JSON line yields a -32700 parse error and the stdio
+  loop survives to serve the next line.
+- Tool handler exceptions surface as a tools/call *result* with
+  ``isError: true`` and a generic message — internal exception text
+  is never leaked to the client.
 """
 
 from __future__ import annotations
@@ -10,6 +20,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+from mcp_server_suite import __version__
 
 
 class ToolHandler(Protocol):
@@ -42,10 +54,18 @@ class McpServer:
         self.auth = auth
         self.bucket = bucket
 
-    def handle(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Handle one JSON-RPC request dict and return the response dict."""
-        req_id = request.get("id", 1)
+    def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        """Handle one JSON-RPC request dict.
+
+        Returns the response dict, or None when the message is a
+        notification (no ``id``) — notifications must not be answered.
+        """
         method = request.get("method", "")
+        if "id" not in request or method.startswith("notifications/"):
+            # Notification: process silently (notifications/initialized
+            # and friends need no action in this minimal core).
+            return None
+        req_id = request.get("id")
         params: dict[str, Any] = request.get("params") or {}
         # Auth gate (initialize may carry _meta.token; tools/call must).
         if self.auth is not None and method in {"tools/call", "tools/list"}:
@@ -55,33 +75,37 @@ class McpServer:
         if self.bucket is not None and method == "tools/call":
             if not self.bucket.allow():  # type: ignore[attr-defined]
                 return self._err(req_id, -32002, "rate limit exceeded")
-        try:
-            if method == "initialize":
-                return self._ok(req_id, {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": self.name, "version": "0.1.0"},
-                    "capabilities": {"tools": {}},
-                })
-            if method == "ping":
-                return self._ok(req_id, {})
-            if method == "tools/list":
-                return self._ok(req_id, {"tools": [
-                    {"name": t.name, "description": t.description,
-                     "inputSchema": t.input_schema}
-                    for t in self.tools.values()
-                ]})
-            if method == "tools/call":
-                tool_name = params.get("name", "")
-                tool = self.tools.get(tool_name)
-                if tool is None:
-                    return self._err(req_id, -32601, f"unknown tool: {tool_name}")
+        if method == "initialize":
+            return self._ok(req_id, {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": self.name, "version": __version__},
+                "capabilities": {"tools": {}},
+            })
+        if method == "ping":
+            return self._ok(req_id, {})
+        if method == "tools/list":
+            return self._ok(req_id, {"tools": [
+                {"name": t.name, "description": t.description,
+                 "inputSchema": t.input_schema}
+                for t in self.tools.values()
+            ]})
+        if method == "tools/call":
+            tool_name = params.get("name", "")
+            tool = self.tools.get(tool_name)
+            if tool is None:
+                return self._err(req_id, -32601, f"unknown tool: {tool_name}")
+            try:
                 result = tool.handler(params.get("arguments") or {})
-                text = result if isinstance(result, str) else json.dumps(result)
-                return self._ok(req_id, {"content": [{"type": "text", "text": text}]})
-            return self._err(req_id, -32601, f"unknown method: {method}")
-        except Exception as exc:  # structured surface, never a stack leak
-            code = getattr(exc, "code", -32000)
-            return self._err(req_id, int(code), str(exc))
+            except Exception:
+                # MCP semantics: tool failures are results with
+                # isError=true. Exception text stays server-side.
+                return self._ok(req_id, {
+                    "content": [{"type": "text", "text": "tool execution failed"}],
+                    "isError": True,
+                })
+            text = result if isinstance(result, str) else json.dumps(result)
+            return self._ok(req_id, {"content": [{"type": "text", "text": text}]})
+        return self._err(req_id, -32601, f"unknown method: {method}")
 
     @staticmethod
     def _ok(req_id: object, result: dict[str, Any]) -> dict[str, Any]:
@@ -91,12 +115,30 @@ class McpServer:
     def _err(req_id: object, code: int, message: str) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
-    def serve_stdio(self) -> None:  # pragma: no cover - manual/integration use
-        """Serve newline-delimited JSON-RPC on stdin/stdout."""
+    def serve_stdio(self) -> None:
+        """Serve newline-delimited JSON-RPC on stdin/stdout.
+
+        Survives malformed lines: each bad line gets a -32700 parse
+        error response (id null) and the loop continues.
+        """
         import sys
 
         for line in sys.stdin:
-            if line.strip():
-                response = self.handle(json.loads(line))
+            if not line.strip():
+                continue
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError:
+                sys.stdout.write(json.dumps(
+                    self._err(None, -32700, "parse error")) + "\n")
+                sys.stdout.flush()
+                continue
+            if not isinstance(request, dict):
+                sys.stdout.write(json.dumps(
+                    self._err(None, -32600, "invalid request")) + "\n")
+                sys.stdout.flush()
+                continue
+            response = self.handle(request)
+            if response is not None:
                 sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()

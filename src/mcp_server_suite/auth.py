@@ -9,8 +9,11 @@ ENV_VAR = "MCP_AUTH_TOKEN"
 
 
 class AuthValidator:
-    """Validate bearer tokens. If no token is configured, auth is disabled
-    only for local development — servers log that state at startup."""
+    """Validate bearer tokens against the configured expected token.
+
+    An empty expected token disables checking at this layer; the CLI
+    refuses to serve in that state unless --allow-unauthenticated was
+    passed explicitly (fail-closed, see cli.py)."""
 
     def __init__(self, expected: str | None = None) -> None:
         self.expected = expected if expected is not None else os.environ.get(ENV_VAR, "")

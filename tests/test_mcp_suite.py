@@ -21,6 +21,12 @@ def call(server: McpServer, tool: str, args: dict, token: str | None = None) -> 
         params["_meta"] = {"token": token}
     return server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params})
 
+def is_error(resp: dict) -> bool:
+    """0.1.1 semantics: tool failures are results with isError=true,
+    not JSON-RPC protocol errors (the pre-0.1.1 tests asserted the old,
+    audited behaviour)."""
+    return resp.get("result", {}).get("isError") is True
+
 def test_protocol_initialize() -> None:
     s = McpServer("x", [])
     r = s.handle({"id": 1, "method": "initialize", "params": {}})
@@ -77,11 +83,11 @@ def test_filesystem_list_and_read(tmp_path: Path) -> None:
 def test_filesystem_jail_escape(tmp_path: Path) -> None:
     s = filesystem_safe.make_server(tmp_path)
     r = call(s, "read_file", {"path": "../../etc/passwd"})
-    assert "error" in r
+    assert is_error(r)
 
 def test_filesystem_missing_file(tmp_path: Path) -> None:
     s = filesystem_safe.make_server(tmp_path)
-    assert "error" in call(s, "read_file", {"path": "ghost.txt"})
+    assert is_error(call(s, "read_file", {"path": "ghost.txt"}))
 
 def test_web_fetch_allowlist_and_cache() -> None:
     calls = {"n": 0}
@@ -92,7 +98,7 @@ def test_web_fetch_allowlist_and_cache() -> None:
     assert "result" in call(s, "fetch", {"url": "https://example.com/x"})
     assert "result" in call(s, "fetch", {"url": "https://example.com/x"})
     assert calls["n"] == 1  # second served from cache
-    assert "error" in call(s, "fetch", {"url": "https://evil.test/x"})
+    assert is_error(call(s, "fetch", {"url": "https://evil.test/x"}))
 
 @pytest.fixture()
 def db(tmp_path: Path) -> Path:
@@ -116,7 +122,7 @@ def test_sqlite_read_only_ok(db: Path) -> None:
 ])
 def test_sqlite_blocks_writes(db: Path, sql: str) -> None:
     s = sqlite_query.make_server(db)
-    assert "error" in call(s, "query", {"sql": sql})
+    assert is_error(call(s, "query", {"sql": sql}))
 
 def test_sqlite_validator_direct() -> None:
     with pytest.raises(PolicyError):

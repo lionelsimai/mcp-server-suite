@@ -34,7 +34,12 @@ mcp-suite demo
 mcp-suite list
 export MCP_AUTH_TOKEN="your-token"
 mcp-suite serve filesystem_safe --root /data/jail
+mcp-suite serve web_fetch --allowlist example.com   # custom domains
 ```
+Serving is **fail-closed**: with `MCP_AUTH_TOKEN` unset, `serve`
+refuses to start unless you pass `--allow-unauthenticated` (local dev
+only, prints a stderr warning). Client configuration examples
+(Claude Desktop / `mcp.json`): [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Real demo output
 ```
@@ -42,9 +47,13 @@ filesystem_safe read: hello from filesystem_safe
 web_fetch first: <html>fetched https://example.com/a</html>
 web_fetch cached: <html>fetched https://example.com/a</html> (network calls: 1)
 sqlite_query result: {"columns": ["name"], "rows": [["alpha"], ["beta"]]}
-sqlite_query write blocked: only SELECT/WITH queries are allowed
+sqlite_query write blocked: tool execution failed (isError=True)
 auth check (wrong token): unauthorized: bad or missing token
 ```
+Tool failures follow MCP semantics (0.1.1): they return a result with
+`isError: true` and a generic message — internal error text is never
+leaked to clients. Protocol errors (auth, rate limit, unknown tool)
+remain JSON-RPC errors.
 
 ## Servers
 - **filesystem_safe** — jailed `list_dir` / `read_file`. [README](servers/filesystem_safe/README.md)
@@ -62,8 +71,13 @@ behaviour (capacity-5 bucket admits exactly 5 of 20 rapid calls).
 
 ## Limitations (honest)
 - Minimal protocol subset (no streaming, resources or prompts yet).
-- Auth is one shared bearer token, not per-client credentials / OAuth.
+- Auth is one shared bearer token, not per-client credentials / OAuth;
+  it travels in each request's `_meta.token`, not a transport header.
 - Web fetch cache is in-memory and per-process.
+- Redirect handling caps at 5 hops and re-validates each hop against
+  the allowlist; content types are not inspected.
+- SQLite guard is keyword-based defence-in-depth on top of SQLite's
+  own read-only mode, not a formal proof of read-only-ness.
 
 ## Roadmap
 - [ ] Resources/prompts support, per-client tokens, persistent cache

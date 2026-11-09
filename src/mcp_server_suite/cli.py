@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -34,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("server", choices=list(SERVERS))
     serve.add_argument("--root", default=".")
     serve.add_argument("--db", default="demo.db")
+    serve.add_argument("--allowlist", action="append", default=None,
+                       help="web_fetch: allow this domain (repeatable); "
+                            "replaces the default allowlist when given")
+    serve.add_argument("--allow-unauthenticated", action="store_true",
+                       help="Serve without a token when MCP_AUTH_TOKEN is "
+                            "unset (local development only)")
     return parser
 
 
@@ -70,7 +77,9 @@ def run_demo() -> int:
         result = _call(sq, "query", {"sql": "SELECT name FROM items ORDER BY id"}, token)
         print("sqlite_query result:", result["result"]["content"][0]["text"])
         blocked = _call(sq, "query", {"sql": "DELETE FROM items"}, token)
-        print("sqlite_query write blocked:", blocked["error"]["message"])
+        blocked_text = blocked["result"]["content"][0]["text"]
+        print("sqlite_query write blocked:", blocked_text,
+              f"(isError={blocked['result'].get('isError', False)})")
         unauth = _call(fs, "read_file", {"path": "hello.txt"}, token="wrong")
         print("auth check (wrong token):", unauth["error"]["message"])
     print(json.dumps({"servers": list(SERVERS), "demo": "ok"}))
@@ -86,13 +95,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "demo":
         return run_demo()
+    # Fail closed: with no token configured, serving would silently
+    # accept every client. Refuse unless explicitly overridden.
+    if not os.environ.get("MCP_AUTH_TOKEN", "") and not args.allow_unauthenticated:
+        print("error: MCP_AUTH_TOKEN is not set; refusing to serve without "
+              "authentication. Set MCP_AUTH_TOKEN or pass "
+              "--allow-unauthenticated for local development.",
+              file=sys.stderr)
+        return 2
+    if not os.environ.get("MCP_AUTH_TOKEN", ""):
+        print("warning: serving WITHOUT authentication "
+              "(--allow-unauthenticated)", file=sys.stderr)
     auth = AuthValidator()
     bucket = TokenBucket()
     server: Any
     if args.server == "filesystem_safe":
         server = filesystem_safe.make_server(Path(args.root), auth=auth, bucket=bucket)
     elif args.server == "web_fetch":
-        server = web_fetch.make_server(auth=auth, bucket=bucket)
+        allowlist = tuple(args.allowlist) if args.allowlist else web_fetch.DEFAULT_ALLOWLIST
+        server = web_fetch.make_server(allowlist=allowlist, auth=auth, bucket=bucket)
     else:
         server = sqlite_query.make_server(Path(args.db), auth=auth, bucket=bucket)
     server.serve_stdio()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-server-suite"
-version = "0.1.0"
+version = "0.1.1"
 description = "3 production MCP servers with auth, rate limits and docs — plumbing others build on."
 readme = "README.md"
 requires-python = ">=3.11"
